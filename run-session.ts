@@ -79,6 +79,9 @@ const pendingToolCalls = new Map<
 console.log("─".repeat(60));
 console.log("Streaming session events...\n");
 
+let done = false;
+
+try {
 for await (const event of streamSession(session.id)) {
   switch (event.type) {
     // ── Agent text output ──────────────────────────────────
@@ -210,6 +213,7 @@ for await (const event of streamSession(session.id)) {
       if (stopReason?.type === "end_turn") {
         console.log("\n\n" + "─".repeat(60));
         console.log("✅ Session completed (end_turn)");
+        done = true;
         break;
       }
       break;
@@ -219,12 +223,21 @@ for await (const event of streamSession(session.id)) {
     case "session.status_terminated": {
       console.error("\n❌ Session terminated unexpectedly");
       console.error(`   Details: ${JSON.stringify(event)}`);
+      done = true;
       break;
     }
 
     default:
       console.log(`   [${event.type}]`, JSON.stringify(event).slice(0, 200));
       break;
+  }
+  if (done) break;
+}
+} catch (err) {
+  // Stream errors after session completion are expected (SSE teardown);
+  // mid-session timeouts are unusual but shouldn't crash the process.
+  if (!done) {
+    console.error("\n⚠️  Stream error:", err instanceof Error ? err.message : err);
   }
 }
 
