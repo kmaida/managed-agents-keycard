@@ -29,6 +29,59 @@ function cols(): number {
   return Math.min(process.stdout.columns || 80, 80);
 }
 
+// ─── Text wrapping ────────────────────────────────────────────────
+
+/**
+ * Word-wrap text to fit within `maxWidth` columns.
+ * Continuation lines are left-padded by `indent` spaces (to align
+ * with a label's value column, e.g. 10 for "Resource: ").
+ * Hard-breaks words that exceed available width (long URLs, tokens).
+ */
+function wrapLine(text: string, maxWidth: number, indent = 0): string[] {
+  // Strip ANSI for width math — only plain-text fields overflow
+  const visible = text.replace(/\x1b\[[0-9;]*m/g, "");
+  if (visible.length <= maxWidth) return [text];
+
+  const words = visible.split(" ");
+  const result: string[] = [];
+  let current = "";
+
+  for (const word of words) {
+    const prefix = current === "" && result.length > 0 ? " ".repeat(indent) : "";
+    const separator = current === "" ? prefix : " ";
+    const candidate = current + separator + word;
+
+    if (candidate.length > maxWidth && current !== "") {
+      // Commit current line, start a new continuation line
+      result.push(current);
+      const indented = " ".repeat(indent) + word;
+      // Hard-break if single word + indent still exceeds maxWidth
+      if (indented.length > maxWidth) {
+        let remaining = indented;
+        while (remaining.length > maxWidth) {
+          result.push(remaining.slice(0, maxWidth));
+          remaining = " ".repeat(indent) + remaining.slice(maxWidth);
+        }
+        current = remaining;
+      } else {
+        current = indented;
+      }
+    } else if (candidate.length > maxWidth) {
+      // First word on this line already too long — hard-break it
+      let remaining = candidate;
+      while (remaining.length > maxWidth) {
+        result.push(remaining.slice(0, maxWidth));
+        remaining = " ".repeat(indent) + remaining.slice(maxWidth);
+      }
+      current = remaining;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) result.push(current);
+  return result;
+}
+
 // ─── Public formatting functions ───────────────────────────────────
 
 /** Full-width horizontal rule with optional embedded label. */
@@ -63,6 +116,10 @@ export function keycardBox(
     return `${style("│", YELLOW)}  ${text}${" ".repeat(padding)}  ${style("│", YELLOW)}`;
   };
 
+  /** Wrap text to fit inside the box, then pad each resulting line. */
+  const padWrapped = (text: string, indent = 0): string[] =>
+    wrapLine(text, inner, indent).map(pad);
+
   const hr = "─".repeat(width - 2);
   const blank = pad("");
 
@@ -71,17 +128,17 @@ export function keycardBox(
   const titlePad = Math.max(0, width - 2 - title.length);
   const topBorder = style(`┌${title}${"─".repeat(titlePad)}┐`, YELLOW);
 
-  // Request fields
+  // Request fields (indent 10 = label width for continuation alignment)
   const lines: string[] = [
-    pad(`Agent:    ${input.target_agent}`),
-    pad(`Action:   ${input.action}`),
-    pad(`Resource: ${input.resource}`),
+    ...padWrapped(`Agent:    ${input.target_agent}`, 10),
+    ...padWrapped(`Action:   ${input.action}`, 10),
+    ...padWrapped(`Resource: ${input.resource}`, 10),
   ];
 
   // Context as key-value pairs (not raw JSON)
   if (input.context && Object.keys(input.context).length > 0) {
     for (const [key, value] of Object.entries(input.context)) {
-      lines.push(pad(`Context:  ${key} = ${String(value)}`));
+      lines.push(...padWrapped(`Context:  ${key} = ${String(value)}`, 10));
     }
   }
 
@@ -89,16 +146,11 @@ export function keycardBox(
 
   // Decision — no emoji inside the box (emoji have inconsistent terminal
   // column widths vs JS .length, which breaks pad() alignment)
-  const isAllow = result.decision === "allow";
-  const decisionText = isAllow ? "ALLOWED" : "DENIED";
-  const decisionStyled = isAllow
-    ? style(decisionText, BOLD, GREEN)
-    : style(decisionText, BOLD, RED);
-  lines.push(pad(decisionStyled));
+  lines.push(pad(decision(result.decision)));
 
   // Policy ID
   if (result.policy_id) {
-    lines.push(pad(`Policy:   ${result.policy_id}`));
+    lines.push(...padWrapped(`Policy:   ${result.policy_id}`, 10));
   }
 
   // Reason — first sentence only (full reason includes agent-facing instructions)
@@ -106,12 +158,12 @@ export function keycardBox(
   const reason = firstSentence
     ? (firstSentence.endsWith(".") ? firstSentence : `${firstSentence}.`)
     : "(no reason provided)";
-  lines.push(pad(`Reason:   ${reason}`));
+  lines.push(...padWrapped(`Reason:   ${reason}`, 10));
 
   // Token (truncated)
   if (result.scoped_token) {
     lines.push(
-      pad(`Token:    ${result.scoped_token.slice(0, 20)}... (${result.expires_in}s)`),
+      ...padWrapped(`Token:    ${result.scoped_token.slice(0, 20)}... (${result.expires_in}s)`, 10),
     );
   }
 
@@ -134,6 +186,18 @@ export function threadEvent(
 ): string {
   const detail = action === "spawned" && model ? ` (${model})` : "";
   return style(`  ↳ thread ${action}${detail}`, DIM, MAGENTA);
+}
+
+/** Bold agent speech — visually distinct from dim tool output. */
+export function agentText(text: string): string {
+  return style(text, BOLD);
+}
+
+/** Color-coded decision label (green ALLOWED / red DENIED). */
+export function decision(type: "allow" | "deny"): string {
+  return type === "allow"
+    ? style("ALLOWED", BOLD, GREEN)
+    : style("DENIED", BOLD, RED);
 }
 
 /** System message — dim for info, bold red for errors. */

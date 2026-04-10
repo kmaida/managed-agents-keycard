@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { createSession, streamSession, sendEvents, getSession } from "./anthropic-api.js";
 import { authorize, setUserToken } from "./keycard-client.js";
 import { keycardLogin } from "keycard-cli-login";
-import { rule, keycardBox, toolMarker, threadEvent, systemMsg } from "./display.js";
+import { rule, keycardBox, toolMarker, threadEvent, systemMsg, agentText, decision } from "./display.js";
 import type { AgentsConfig, AuthorizationRequest } from "./types.js";
 import type {
   BetaManagedAgentsEventParams,
@@ -92,7 +92,7 @@ for await (const event of streamSession(session.id)) {
       }>;
       for (const block of contents) {
         if (block.type === "text" && block.text) {
-          process.stdout.write(block.text);
+          process.stdout.write(agentText(block.text));
         }
       }
       break;
@@ -204,7 +204,25 @@ for await (const event of streamSession(session.id)) {
       break;
     }
 
+    // ── Tool results (extract text, show dim) ──────────────
+    case "agent.tool_result": {
+      const blocks = event.content as Array<{ type: string; text?: string }>;
+      for (const block of blocks) {
+        if (block.type === "text" && block.text) {
+          const preview = block.text.length > 200
+            ? block.text.slice(0, 200) + "…"
+            : block.text;
+          for (const line of preview.split("\n")) {
+            console.log(systemMsg(`     ${line}`));
+          }
+        }
+      }
+      break;
+    }
+
     default:
+      // Filter out SDK telemetry spans — noise for demo audience
+      if ((event.type as string).startsWith("span.")) break;
       console.log(systemMsg(`   [${event.type}] ${JSON.stringify(event).slice(0, 120)}`));
       break;
   }
@@ -223,9 +241,9 @@ for await (const event of streamSession(session.id)) {
 console.log("\n" + rule("DEMO SUMMARY"));
 console.log("   • Orchestrator cloned a real repo and worked on actual code");
 console.log("   • Each action was gated by keycard_authorize → Keycard STS");
-console.log("   • Code review: ALLOWED — agent found real security vulnerabilities");
-console.log("   • Test execution: ALLOWED — agent ran npm test against real code");
-console.log("   • Production deploy: DENIED — Cedar policy blocked feature branch deploy");
+console.log(`   • Code review: ${decision("allow")} — agent found real security vulnerabilities`);
+console.log(`   • Test execution: ${decision("allow")} — agent ran npm test against real code`);
+console.log(`   • Production deploy: ${decision("deny")} — Cedar policy blocked feature branch deploy`);
 console.log(
   "\n   Keycard provides the authorization governance layer for AI agent actions."
 );
