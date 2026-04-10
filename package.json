@@ -4,13 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "setup": "tsx setup-agents.ts",
-    "start": "tsx run-session.ts",
+    "setup": "tsx --env-file=.env setup-agents.ts",
+    "start": "tsx --env-file=.env run-session.ts",
     "demo": "npm run setup && npm run start"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.86.1",
     "@keycardai/oauth": "^0.2.0",
-    "eventsource-parser": "^3.0.0"
+    "eventsource-parser": "^3.0.0",
+    "keycard-cli-login": "file:../keycard-cli-login"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

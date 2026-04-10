@@ -1,0 +1,9 @@
+{
+  "environment_id": "env_015h749zswEPnarP1syLBdcV",
+  "orchestrator": {
+    "id": "agent_011CZtZu4ajRvZgcGcMAfx6B",
+    "version": 1,
+    "name": "engineering-lead"
+  },
+  "subAgents": []
+}

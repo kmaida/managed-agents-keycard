@@ -1,8 +1,6 @@
 // types.ts — Shared types for the Managed Agents + Keycard demo
 
-export const BETA_HEADER = "managed-agents-2026-04-01";
-export const API_VERSION = "2023-06-01";
-export const API_BASE = "https://api.anthropic.com/v1";
+import type { BetaManagedAgentsCustomToolParams } from "@anthropic-ai/sdk/resources/beta/agents";
 
 export interface AgentRef {
   id: string;
@@ -18,7 +16,7 @@ export interface AgentsConfig {
 
 // Custom tool schema for keycard_authorize
 export const KEYCARD_AUTHORIZE_TOOL = {
-  type: "custom" as const,
+  type: "custom",
   name: "keycard_authorize",
   description: `Authorize an action before performing it. Call this tool BEFORE delegating
 work to another agent or before executing any sensitive operation (deploy, write,
@@ -34,7 +32,7 @@ You MUST call this tool before:
 If the result is "denied", do NOT proceed with the action. Report the denial
 reason to the user and suggest alternatives.`,
   input_schema: {
-    type: "object" as const,
+    type: "object",
     properties: {
       target_agent: {
         type: "string",
@@ -61,7 +59,7 @@ reason to the user and suggest alternatives.`,
     },
     required: ["target_agent", "action", "resource"],
   },
-};
+} satisfies BetaManagedAgentsCustomToolParams;
 
 // Authorization request/response types
 export interface AuthorizationRequest {

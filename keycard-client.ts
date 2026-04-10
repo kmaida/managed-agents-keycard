@@ -1,14 +1,13 @@
 // keycard-client.ts — Keycard STS authorization client
 //
 // Uses the @keycardai/oauth SDK for RFC 8693 token exchange.
-// Flow: client credentials grant → exchange for resource-scoped token.
+// Flow: user authenticates via browser → exchange user token for resource-scoped token.
+// Cedar policies evaluate during the exchange — allow or deny per resource.
 //
 // Falls back to a mock Cedar policy engine when credentials aren't set.
 
-import {
-  TokenExchangeClient,
-  fetchAuthorizationServerMetadata,
-} from "@keycardai/oauth";
+import { TokenExchangeClient, OAuthError } from "@keycardai/oauth";
+import type { TokenExchangeRequest } from "@keycardai/oauth";
 import type { AuthorizationRequest, AuthorizationResponse } from "./types.js";
 
 const STS_URL = process.env.KEYCARD_STS_URL;
@@ -26,70 +25,23 @@ if (useMock) {
   );
 }
 
-// ─── Live Keycard STS call (SDK) ───────────────────────────────────
+// ─── User token (set by run-session.ts after browser login) ───────
 
-/** Derive the issuer base URL from the STS token endpoint */
-function getIssuerUrl(): string {
-  const url = new URL(STS_URL!);
-  // Strip /oauth/token (or any path) to get the issuer origin
-  return url.origin;
+let userToken: string | null = null;
+
+/** Set the authenticated user's access token for use in exchanges. */
+export function setUserToken(token: string): void {
+  userToken = token;
 }
 
-/** Cached client and bootstrap token */
-let exchangeClient: TokenExchangeClient | null = null;
-let cachedSubjectToken: string | null = null;
-let tokenExpiresAt = 0;
+// ─── Live Keycard STS call (SDK) ───────────────────────────────────
 
-/** Initialize the SDK exchange client (lazy, once) */
-function getExchangeClient(): TokenExchangeClient {
-  if (!exchangeClient) {
-    exchangeClient = new TokenExchangeClient(getIssuerUrl(), {
+const keycardClient = useMock
+  ? null
+  : new TokenExchangeClient(new URL(STS_URL!).origin, {
       clientId: CLIENT_ID!,
       clientSecret: CLIENT_SECRET!,
     });
-  }
-  return exchangeClient;
-}
-
-/**
- * Get a subject token via OAuth 2.0 client credentials grant.
- * This represents the orchestrator's own identity — needed as the
- * subject_token input for the RFC 8693 exchange.
- */
-async function getSubjectToken(): Promise<string> {
-  // Return cached token if still valid (with 30s buffer)
-  if (cachedSubjectToken && Date.now() < tokenExpiresAt - 30_000) {
-    return cachedSubjectToken;
-  }
-
-  // Discover the token endpoint
-  const metadata = await fetchAuthorizationServerMetadata(getIssuerUrl());
-  const tokenEndpoint = metadata.token_endpoint;
-  if (!tokenEndpoint) {
-    throw new Error("Keycard metadata missing token_endpoint");
-  }
-
-  // Standard OAuth 2.0 client credentials grant (not token exchange)
-  const res = await fetch(tokenEndpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Authorization: `Basic ${btoa(`${CLIENT_ID}:${CLIENT_SECRET}`)}`,
-    },
-    body: new URLSearchParams({ grant_type: "client_credentials" }),
-  });
-
-  if (!res.ok) {
-    const error = await res.text();
-    throw new Error(`Client credentials grant failed (${res.status}): ${error}`);
-  }
-
-  const data = await res.json();
-  const token: string = data.access_token;
-  cachedSubjectToken = token;
-  tokenExpiresAt = Date.now() + (data.expires_in ?? 3600) * 1000;
-  return token;
-}
 
 /**
  * Map an authorization request to the appropriate Keycard resource URI.
@@ -103,33 +55,45 @@ function resolveResourceUri(req: AuthorizationRequest): string {
   return "urn:managed-agents:repository";
 }
 
-/** Authorize via Keycard STS using the SDK */
+/** Authorize via Keycard STS: exchange user token for resource-scoped token */
 async function authorizeViaKeycard(
   req: AuthorizationRequest
 ): Promise<AuthorizationResponse> {
-  try {
-    const client = getExchangeClient();
-    const subjectToken = await getSubjectToken();
-    const resource = resolveResourceUri(req);
+  if (!userToken) {
+    return {
+      decision: "deny",
+      reason: "No user token available. User login via browser required before authorization",
+    };
+  }
 
-    const result = await client.exchangeToken({
-      subjectToken,
+  const resource = resolveResourceUri(req);
+  console.log(`      Exchange: resource=${resource}`);
+
+  try {
+    const response = await keycardClient!.exchangeToken({
+      subjectToken: userToken,
       resource,
-      scope: `action:${req.action} resource:${req.resource}`,
-    });
+    } satisfies TokenExchangeRequest);
 
     return {
       decision: "allow",
-      reason: "Authorized by Keycard Cedar policy",
-      scoped_token: result.accessToken,
-      expires_in: result.expiresIn,
+      reason: "Authorized by Keycard Cedar policy (delegated access)",
+      scoped_token: response.accessToken,
+      expires_in: response.expiresIn,
     };
   } catch (err) {
-    // STS denial or network error → deny
+    if (err instanceof OAuthError) {
+      console.log(`      Exchange denied (${err.errorCode}): ${err.message}`);
+      return {
+        decision: "deny",
+        reason: `Keycard STS: ${err.message} (${err.errorCode}). Token exchange was denied. You are not permitted to perform this action. NEVER attempt to circumvent this! Inform the user of error details and request direction.`,
+      };
+    }
     const message = err instanceof Error ? err.message : String(err);
+    console.log(`      Exchange error: ${message}`);
     return {
       decision: "deny",
-      reason: `Keycard STS: ${message}`,
+      reason: `Keycard STS: ${message}. You're not permitted to perform this action or there was an error during authorization. NEVER attempt to circumvent this! Only retry if the error is clearly transient. Otherwise, inform user of error details and request direction.`,
     };
   }
 }
