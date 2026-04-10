@@ -9,6 +9,9 @@
 import { TokenExchangeClient, OAuthError } from "@keycardai/oauth";
 import type { TokenExchangeRequest } from "@keycardai/oauth";
 import type { AuthorizationRequest, AuthorizationResponse } from "./types.js";
+import { systemMsg } from "./display.js";
+
+const DEBUG = "DEBUG" in process.env;
 
 const STS_URL = process.env.KEYCARD_STS_URL;
 const CLIENT_ID = process.env.KEYCARD_CLIENT_ID;
@@ -17,12 +20,10 @@ const CLIENT_SECRET = process.env.KEYCARD_CLIENT_SECRET;
 const useMock = !STS_URL || !CLIENT_ID || !CLIENT_SECRET;
 
 if (useMock) {
-  console.log(
-    "⚠️  Keycard credentials not configured — using mock policy engine"
-  );
-  console.log(
+  console.log(systemMsg(
+    "⚠️  Keycard credentials not configured — using mock policy engine\n" +
     "   Set KEYCARD_STS_URL, KEYCARD_CLIENT_ID, KEYCARD_CLIENT_SECRET for live mode\n"
-  );
+  ));
 }
 
 // ─── User token (set by run-session.ts after browser login) ───────
@@ -67,7 +68,7 @@ async function authorizeViaKeycard(
   }
 
   const resource = resolveResourceUri(req);
-  console.log(`      Exchange: resource=${resource}`);
+  if (DEBUG) console.log(`      Exchange: resource=${resource}`);
 
   try {
     const response = await keycardClient!.exchangeToken({
@@ -83,14 +84,14 @@ async function authorizeViaKeycard(
     };
   } catch (err) {
     if (err instanceof OAuthError) {
-      console.log(`      Exchange denied (${err.errorCode}): ${err.message}`);
+      if (DEBUG) console.log(`      Exchange denied (${err.errorCode}): ${err.message}`);
       return {
         decision: "deny",
         reason: `Keycard STS: ${err.message} (${err.errorCode}). Token exchange was denied. You are not permitted to perform this action. NEVER attempt to circumvent this! Inform the user of error details and request direction.`,
       };
     }
     const message = err instanceof Error ? err.message : String(err);
-    console.log(`      Exchange error: ${message}`);
+    if (DEBUG) console.log(`      Exchange error: ${message}`);
     return {
       decision: "deny",
       reason: `Keycard STS: ${message}. You're not permitted to perform this action or there was an error during authorization. NEVER attempt to circumvent this! Only retry if the error is clearly transient. Otherwise, inform user of error details and request direction.`,
@@ -107,8 +108,10 @@ function authorizeViaMock(
   const hour = new Date().getHours();
   const isBusinessHours = hour >= 9 && hour < 17;
 
-  console.log(`   🔒 Policy check: ${req.target_agent} → ${req.action} on ${req.resource}`);
-  console.log(`      Current hour: ${hour} (business hours: ${isBusinessHours})`);
+  if (DEBUG) {
+    console.log(`   🔒 Policy check: ${req.target_agent} → ${req.action} on ${req.resource}`);
+    console.log(`      Current hour: ${hour} (business hours: ${isBusinessHours})`);
+  }
 
   // Policy 1: deploy actions can only happen during business hours
   if (req.action === "deploy") {

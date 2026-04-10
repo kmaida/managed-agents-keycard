@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { createSession, streamSession, sendEvents, getSession } from "./anthropic-api.js";
 import { authorize, setUserToken } from "./keycard-client.js";
 import { keycardLogin } from "keycard-cli-login";
+import { rule, keycardBox, toolMarker, threadEvent, systemMsg } from "./display.js";
 import type { AgentsConfig, AuthorizationRequest } from "./types.js";
 import type {
   BetaManagedAgentsEventParams,
@@ -45,9 +46,9 @@ if (stsUrl && clientId) {
 
 // ─── Create session ─────────────────────────────────────────────────
 
-console.log("Creating session...");
+console.log(systemMsg("Creating session..."));
 const session = await createSession(config.orchestrator.id, config.environment_id);
-console.log(`   ✓ Session: ${session.id} (${session.status})\n`);
+console.log(systemMsg(`   ✓ Session: ${session.id} (${session.status})\n`));
 
 // ─── Send the demo task ─────────────────────────────────────────────
 
@@ -58,7 +59,7 @@ const DEMO_TASK = `Clone the repo at https://github.com/kmaida/managed-agents-sa
 
 Report findings from each step.`;
 
-console.log("📋 Sending task to orchestrator:\n");
+console.log(rule("TASK"));
 console.log(`   "${DEMO_TASK.split("\n")[0]}..."\n`);
 
 await sendEvents(session.id, [
@@ -76,8 +77,7 @@ const pendingToolCalls = new Map<
   { name: string; input: AuthorizationRequest; threadId?: string }
 >();
 
-console.log("─".repeat(60));
-console.log("Streaming session events...\n");
+console.log(rule("STREAMING"));
 
 let done = false;
 
@@ -99,21 +99,15 @@ for await (const event of streamSession(session.id)) {
     }
 
     // ── Custom tool call (keycard_authorize) ───────────────
+    // Display is deferred to the requires_action handler so we can
+    // render the full request + decision as one atomic keycardBox.
     case "agent.custom_tool_use": {
-      const toolName = event.name as string;
       const toolInput = event.input as AuthorizationRequest;
       const eventId = event.id as string;
       const threadId = event.session_thread_id as string | undefined;
 
-      console.log(`\n\n🔐 Custom tool call: ${toolName}`);
-      console.log(
-        `   Input: ${JSON.stringify(toolInput, null, 2)
-          .split("\n")
-          .join("\n   ")}`
-      );
-
       pendingToolCalls.set(eventId, {
-        name: toolName,
+        name: event.name as string,
         input: toolInput,
         threadId,
       });
@@ -122,8 +116,7 @@ for await (const event of streamSession(session.id)) {
 
     // ── Built-in tool calls (for observability) ────────────
     case "agent.tool_use": {
-      const toolName = event.name as string;
-      console.log(`\n   🔧 Built-in tool: ${toolName}`);
+      console.log(`\n${toolMarker(event.name as string)}`);
       break;
     }
 
@@ -132,12 +125,11 @@ for await (const event of streamSession(session.id)) {
     // BetaManagedAgentsStreamSessionEvents (SDK 0.86.1). These events exist at
     // runtime but aren't typed. Revisit when SDK adds them.
     case "session.thread_created": {
-      const model = event.model as string;
-      console.log(`\n   🧵 New thread spawned (model: ${model})`);
+      console.log(`\n${threadEvent("spawned", event.model as string)}`);
       break;
     }
     case "session.thread_idle": {
-      console.log(`\n   🧵 Thread completed`);
+      console.log(`\n${threadEvent("completed")}`);
       break;
     }
 
@@ -149,26 +141,13 @@ for await (const event of streamSession(session.id)) {
       };
 
       if (stopReason?.type === "requires_action" && stopReason.event_ids) {
-        console.log(
-          `\n\n⏸️  Session paused: ${stopReason.event_ids.length} action(s) required`
-        );
-
         for (const eventId of stopReason.event_ids) {
           const pending = pendingToolCalls.get(eventId);
 
           if (pending?.name === "keycard_authorize") {
-            // Route through Keycard
-            console.log("\n   Calling Keycard for authorization...");
+            // Route through Keycard and display atomic authorization box
             const result = await authorize(pending.input);
-
-            const emoji = result.decision === "allow" ? "✅" : "🚫";
-            console.log(`   ${emoji} Decision: ${result.decision}`);
-            console.log(`      Reason: ${result.reason}`);
-            if (result.scoped_token) {
-              console.log(
-                `      Token: ${result.scoped_token.slice(0, 20)}... (expires in ${result.expires_in}s)`
-              );
-            }
+            console.log(`\n${keycardBox(pending.input, result)}`);
 
             // Send result back to the session
             const toolResultEvent: BetaManagedAgentsUserCustomToolResultEventParams = {
@@ -200,19 +179,17 @@ for await (const event of streamSession(session.id)) {
               await sendEvents(session.id, [toolResultEvent]);
             }
             pendingToolCalls.delete(eventId);
-            console.log("   → Result sent back to session\n");
           } else {
             // Untracked action — log and skip (may be a built-in tool confirmation)
-            console.log(
+            console.log(systemMsg(
               `   ⚠️  Untracked action ${eventId} (not in pendingToolCalls), skipping`
-            );
+            ));
           }
         }
       }
 
       if (stopReason?.type === "end_turn") {
-        console.log("\n\n" + "─".repeat(60));
-        console.log("✅ Session completed (end_turn)");
+        console.log("\n\n" + rule("SESSION COMPLETE"));
         done = true;
         break;
       }
@@ -221,14 +198,14 @@ for await (const event of streamSession(session.id)) {
 
     // ── Session errors ─────────────────────────────────────
     case "session.status_terminated": {
-      console.error("\n❌ Session terminated unexpectedly");
-      console.error(`   Details: ${JSON.stringify(event)}`);
+      console.error(systemMsg("\n❌ Session terminated unexpectedly", true));
+      console.error(systemMsg(`   Details: ${JSON.stringify(event).slice(0, 200)}`));
       done = true;
       break;
     }
 
     default:
-      console.log(`   [${event.type}]`, JSON.stringify(event).slice(0, 200));
+      console.log(systemMsg(`   [${event.type}] ${JSON.stringify(event).slice(0, 120)}`));
       break;
   }
   if (done) break;
@@ -237,13 +214,13 @@ for await (const event of streamSession(session.id)) {
   // Stream errors after session completion are expected (SSE teardown);
   // mid-session timeouts are unusual but shouldn't crash the process.
   if (!done) {
-    console.error("\n⚠️  Stream error:", err instanceof Error ? err.message : err);
+    console.error(systemMsg(`\n⚠️  Stream error: ${err instanceof Error ? err.message : err}`, true));
   }
 }
 
 // ─── Print summary ──────────────────────────────────────────────────
 
-console.log("\n\n📊 Demo summary:");
+console.log("\n" + rule("DEMO SUMMARY"));
 console.log("   • Orchestrator cloned a real repo and worked on actual code");
 console.log("   • Each action was gated by keycard_authorize → Keycard STS");
 console.log("   • Code review: ALLOWED — agent found real security vulnerabilities");
@@ -258,9 +235,9 @@ try {
   const final = await getSession(session.id);
   const usage = (final as unknown as { usage: { input_tokens: number; output_tokens: number } }).usage;
   if (usage) {
-    console.log(
+    console.log(systemMsg(
       `\n💰 Token usage: ${usage.input_tokens} input / ${usage.output_tokens} output`
-    );
+    ));
   }
 } catch {
   // non-critical
