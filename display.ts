@@ -52,18 +52,32 @@ function wrapLine(text: string, maxWidth: number, indent = 0): string[] {
     const candidate = current + separator + word;
 
     if (candidate.length > maxWidth && current !== "") {
-      // Commit current line, start a new continuation line
-      result.push(current);
       const indented = " ".repeat(indent) + word;
-      // Hard-break if single word + indent still exceeds maxWidth
       if (indented.length > maxWidth) {
-        let remaining = indented;
-        while (remaining.length > maxWidth) {
-          result.push(remaining.slice(0, maxWidth));
-          remaining = " ".repeat(indent) + remaining.slice(maxWidth);
+        // Word won't fit on its own continuation line either —
+        // hard-break starting from the current line to keep label visible
+        const spaceLeft = maxWidth - current.length - 1;
+        if (spaceLeft >= 1) {
+          result.push(current + " " + word.slice(0, spaceLeft));
+          let remaining = " ".repeat(indent) + word.slice(spaceLeft);
+          while (remaining.length > maxWidth) {
+            result.push(remaining.slice(0, maxWidth));
+            remaining = " ".repeat(indent) + remaining.slice(maxWidth);
+          }
+          current = remaining;
+        } else {
+          // No space left on current line — commit it, hard-break word on next
+          result.push(current);
+          let remaining = indented;
+          while (remaining.length > maxWidth) {
+            result.push(remaining.slice(0, maxWidth));
+            remaining = " ".repeat(indent) + remaining.slice(maxWidth);
+          }
+          current = remaining;
         }
-        current = remaining;
       } else {
+        // Word fits on a fresh continuation line — clean wrap
+        result.push(current);
         current = indented;
       }
     } else if (candidate.length > maxWidth) {
@@ -106,7 +120,7 @@ export function keycardBox(
   result: AuthorizationResponse,
 ): string {
   const width = Math.min(cols(), 62);
-  const inner = width - 4; // space inside │  ...  │
+  const inner = width - 6; // visible chars between │  ...  │ (6 = border overhead)
 
   const pad = (text: string) => {
     // Visible length (strip ANSI codes for padding calculation)
@@ -188,9 +202,86 @@ export function threadEvent(
   return style(`  ↳ thread ${action}${detail}`, DIM, MAGENTA);
 }
 
-/** Bold agent speech — visually distinct from dim tool output. */
+/**
+ * Format agent text for terminal display.
+ * Detects markdown tables and reformats them as readable blocks.
+ * Strips common markdown formatting (bold, backticks).
+ */
 export function agentText(text: string): string {
+  // Check if text contains a markdown table (|---|)
+  if (text.includes("|---") || text.includes("| ---")) {
+    return style(formatMarkdownTable(text), BOLD);
+  }
   return style(text, BOLD);
+}
+
+/** Strip markdown bold (**text**) and inline code (`text`). */
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/`(.*?)`/g, "$1");
+}
+
+/**
+ * Convert a markdown table into terminal-friendly indented blocks.
+ * Each row becomes a block with the first cell as a header line
+ * and remaining cells as indented details.
+ */
+function formatMarkdownTable(text: string): string {
+  const lines = text.split("\n");
+  const result: string[] = [];
+  let headers: string[] = [];
+  let inTable = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    // Separator row (|---|---|)
+    if (/^\|[\s-:]+\|/.test(trimmed) && trimmed.replace(/[\s|:-]/g, "") === "") {
+      continue;
+    }
+
+    // Table row
+    if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
+      const cells = trimmed
+        .slice(1, -1)
+        .split("|")
+        .map((c) => stripMarkdown(c.trim()));
+
+      if (!inTable) {
+        // First row = headers
+        headers = cells;
+        inTable = true;
+        continue;
+      }
+
+      // Data row — format as a block
+      if (result.length > 0 && inTable) result.push(""); // blank line between rows
+
+      // Use first cell as prefix, second cell as main content
+      if (cells.length >= 2) {
+        result.push(`${cells[0]}  ${cells[1]}`);
+        // Remaining cells as indented details (e.g., Location)
+        for (let i = 2; i < cells.length; i++) {
+          if (cells[i]) {
+            const label = headers[i] ? `${headers[i]}: ` : "";
+            result.push(`   ${label}${cells[i]}`);
+          }
+        }
+      } else {
+        result.push(cells.join("  "));
+      }
+    } else {
+      // Non-table line — pass through (reset table state)
+      if (inTable) {
+        inTable = false;
+        headers = [];
+      }
+      result.push(stripMarkdown(trimmed));
+    }
+  }
+
+  return result.join("\n");
 }
 
 /** Color-coded decision label (green ALLOWED / red DENIED). */
